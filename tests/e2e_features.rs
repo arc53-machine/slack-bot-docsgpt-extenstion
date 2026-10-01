@@ -50,6 +50,29 @@ async fn user_files_become_attachments() {
 }
 
 #[tokio::test]
+async fn file_stubs_are_looked_up_with_files_info() {
+    // Slack often sends only {id, file_access: "check_file_info"} in the event.
+    let t = start(|_| {}).await;
+    t.slack.add_file("F42", "text/plain", b"the launch code is 4471");
+    let mut e = dm_event("what's in it?", &next_ts(), None);
+    e["subtype"] = "file_share".into();
+    e["files"] = json!([{"id": "F42", "mode": "hidden_by_limit_not", "file_access": "check_file_info"}]);
+    t.event(e).await;
+    assert_eq!(t.slack.rec.last("files.info").unwrap().body["file"], "F42");
+    let up = t.docs.rec.last("/api/store_attachment").expect("uploaded to DocsGPT");
+    assert_eq!(up.file("file").filename, "F42.txt");
+    assert_eq!(&up.file("file").bytes[..], b"the launch code is 4471");
+    assert_eq!(t.slack.rejected(), Vec::<String>::new());
+    assert!(
+        t.slack
+            .rec
+            .calls("chat.postMessage")
+            .iter()
+            .all(|c| !c.body["text"].as_str().unwrap_or("").contains("can't open"))
+    );
+}
+
+#[tokio::test]
 async fn voice_clip_without_text_is_transcribed() {
     let t = start(|_| {}).await;
     t.docs.set_stt("how do I reset my password");

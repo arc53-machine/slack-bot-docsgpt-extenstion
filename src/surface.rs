@@ -33,8 +33,10 @@ pub struct SlackDraft {
     _cancel: CancelGuard,
     /// The streaming message, once started.
     stream_ts: Option<String>,
-    /// Bytes of `Progress::raw` already in the stream.
+    /// Bytes of `Progress::raw` already delivered.
     sent: usize,
+    /// Characters of text in the current streamed message.
+    msg_chars: usize,
     /// Tool step shown as a task: (id, title).
     task: Option<(String, String)>,
     tasks: u32,
@@ -80,7 +82,8 @@ impl SlackSurface {
     async fn stop_stream(&self, ts: &str, text: &str, blocks: &[Value]) -> Result<(), SlackError> {
         let mut body = json!({"ts": ts});
         if !text.is_empty() {
-            body["markdown_text"] = text.into();
+            // The stream started with `chunks`; Slack rejects switching to `markdown_text`.
+            body["chunks"] = json!([{"type": "markdown_text", "text": text}]);
         }
         if !blocks.is_empty() {
             body["blocks"] = blocks.into();
@@ -93,6 +96,16 @@ impl SlackSurface {
             }
             other => other.map(drop),
         }
+    }
+
+    /// Close a full streamed message; the rest of the answer is posted by `finish`.
+    async fn close_full(&self, d: &mut SlackDraft) {
+        if let Some(ts) = d.stream_ts.take()
+            && let Err(e) = self.stop_stream(&ts, "", &[]).await
+        {
+            tracing::warn!(error = %e, "could not close a full stream");
+        }
+        d.streaming = false;
     }
 
     /// Post `text` as one or more messages; the last one carries `extra` blocks. Returns its ts.
@@ -167,6 +180,7 @@ impl Surface for SlackSurface {
             _cancel: guard,
             stream_ts: None,
             sent: 0,
+            msg_chars: 0,
             task: None,
             tasks: 0,
             streaming: self.bot.cfg.streaming,
@@ -193,7 +207,13 @@ impl Surface for SlackSurface {
                 next_task = Some((id, title));
             }
         }
-        let delta: String = p.raw[d.sent..].chars().take(render::MARKDOWN_LIMIT).collect();
+        if d.stream_ts.is_some() && d.msg_chars >= render::STREAM_MESSAGE_LIMIT {
+            // This message is full: close it; the rest is posted at the end.
+            self.close_full(d).await;
+            return Ok(());
+        }
+        let room = render::STREAM_MESSAGE_LIMIT - d.msg_chars;
+        let delta: String = p.raw[d.sent..].chars().take(room).collect();
         if !delta.is_empty() {
             chunks.push(json!({"type": "markdown_text", "text": delta}));
         }
@@ -229,6 +249,7 @@ impl Surface for SlackSurface {
         match result {
             Ok(()) => {
                 d.sent += delta.len();
+                d.msg_chars += delta.chars().count();
                 d.task = next_task;
                 d.tasks = tasks;
                 Ok(())
@@ -240,12 +261,7 @@ impl Surface for SlackSurface {
                 Ok(())
             }
             Err(e) if e.code() == Some("msg_too_long") => {
-                // Close this message and continue in a new one.
-                if let Some(ts) = d.stream_ts.take()
-                    && let Err(e) = self.stop_stream(&ts, "", &[]).await
-                {
-                    tracing::warn!(error = %e, "could not close a full stream");
-                }
+                self.close_full(d).await;
                 Ok(())
             }
             Err(e) if d.stream_ts.is_none() => {
@@ -276,31 +292,19 @@ impl Surface for SlackSurface {
             blocks.push(render::feedback_block());
         }
 
-        let ts = match (&d.stream_ts, d.streaming) {
-            (Some(ts), true) => {
-                // The rest of the answer, then the note, then the blocks.
-                let mut text = if f.answer.is_empty() {
-                    f.display_text()
-                } else {
-                    let mut t = f.raw.get(d.sent..).unwrap_or("").to_string();
-                    if let Some(note) = f.note() {
-                        t.push_str("\n\n");
-                        t.push_str(&note);
-                    }
-                    t
-                };
-                let pieces = render::stream_pieces(&text);
-                if pieces.len() > 1 {
-                    for piece in &pieces[..pieces.len() - 1] {
-                        if let Err(e) = self
-                            .stream_call("chat.appendStream", json!({"ts": ts, "markdown_text": piece}))
-                            .await
-                        {
-                            tracing::warn!(error = %e, "appending the rest of the answer failed");
-                        }
-                    }
-                    text = pieces.last().cloned().unwrap_or_default();
-                }
+        // What hasn't been shown yet: the rest of the answer and the note, or
+        // the whole display text when nothing was streamed.
+        let text = if d.sent == 0 {
+            f.display_text()
+        } else {
+            let rest = f.raw.get(d.sent..).unwrap_or("");
+            match f.note() {
+                Some(n) => format!("{rest}\n\n{n}"),
+                None => rest.to_string(),
+            }
+        };
+        let ts = match &d.stream_ts {
+            Some(ts) if text.chars().count() + d.msg_chars <= render::STREAM_MESSAGE_LIMIT => {
                 match self.stop_stream(ts, &text, &blocks).await {
                     Ok(()) => ts.clone(),
                     Err(e) if stream_ended(&e) => {
@@ -308,22 +312,20 @@ impl Surface for SlackSurface {
                         tracing::info!(error = %e, "stream already stopped");
                         return Ok(None);
                     }
+                    Err(e) if e.code() == Some("msg_too_long") => {
+                        let _ = self.stop_stream(ts, "", &[]).await;
+                        self.post_answer(text.trim(), blocks).await.map_err(platform)?
+                    }
                     Err(e) => return Err(platform(e)),
                 }
             }
-            (Some(ts), false) => {
-                // Streaming was abandoned mid-way: close it and post the rest.
+            Some(ts) => {
+                // Too long for this message: close it and post the rest.
                 let _ = self.stop_stream(ts, "", &[]).await;
-                let rest = f.raw.get(d.sent..).unwrap_or("").trim().to_string();
-                let text = match f.note() {
-                    Some(n) if !rest.is_empty() => format!("{rest}\n\n{n}"),
-                    Some(n) => n,
-                    None => rest,
-                };
-                self.post_answer(&text, blocks).await.map_err(platform)?
+                self.post_answer(text.trim(), blocks).await.map_err(platform)?
             }
-            (None, _) => {
-                let ts = self.post_answer(&f.display_text(), blocks).await.map_err(platform)?;
+            None => {
+                let ts = self.post_answer(text.trim(), blocks).await.map_err(platform)?;
                 if self.session_enabled() {
                     self.set_session("active", None).await;
                 }

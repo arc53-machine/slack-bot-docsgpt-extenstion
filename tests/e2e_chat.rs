@@ -32,6 +32,7 @@ async fn dm_streams_an_answer_with_sources_and_feedback() {
     assert!(start.body.get("recipient_user_id").is_none(), "not needed in DMs");
     assert_eq!(start.body["task_display_mode"], "timeline");
     assert_eq!(t.slack.streamed_text(), "DocsGPT answers from your docs.");
+    assert_eq!(t.slack.rejected(), Vec::<String>::new());
 
     let stop = rec.last("chat.stopStream").expect("stream stopped");
     let blocks = stop.body["blocks"].as_array().unwrap();
@@ -250,7 +251,7 @@ async fn native_stop_ends_the_turn() {
         started.elapsed()
     );
     let stop = t.slack.rec.last("chat.stopStream").unwrap();
-    assert_eq!(stop.body["markdown_text"], "\n\n_Stopped._");
+    assert_eq!(stop.body["chunks"][0]["text"], "\n\n_Stopped._");
     assert!(!t.slack.streamed_text().contains("never"));
 }
 
@@ -331,12 +332,7 @@ async fn falls_back_to_one_message_when_streaming_is_unavailable() {
     assert_eq!(blocks.last().unwrap()["type"], "context_actions");
     assert_eq!(msg.body["text"], "A complete answer.");
     // Feedback still maps to the posted message.
-    t.click_feedback(
-        DM,
-        msg.body["thread_ts"].as_str().map(|_| "1000.000100").unwrap(),
-        "positive",
-    )
-    .await;
+    t.click_feedback(DM, &msg.query["ts"], "positive").await;
     assert_eq!(t.docs.rec.count("/api/feedback"), 1);
 }
 
@@ -411,7 +407,28 @@ async fn long_answers_are_split_across_calls() {
         ])
     });
     t.dm("q").await;
-    assert_eq!(t.slack.streamed_text(), long);
+    assert_eq!(t.slack.rejected(), Vec::<String>::new());
+    // The stream holds what fits; the rest follows as messages, buttons on the last one.
+    let posted: String = t
+        .slack
+        .rec
+        .calls("chat.postMessage")
+        .iter()
+        .flat_map(|c| c.body["blocks"].as_array().cloned().unwrap_or_default())
+        .filter(|b| b["type"] == "markdown")
+        .map(|b| b["text"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let delivered = format!("{}{}", t.slack.streamed_text(), posted);
+    assert_eq!(
+        delivered.split_whitespace().collect::<Vec<_>>(),
+        long.split_whitespace().collect::<Vec<_>>()
+    );
+    let last = t.slack.rec.last("chat.postMessage").expect("overflow posted");
+    assert_eq!(
+        last.body["blocks"].as_array().unwrap().last().unwrap()["type"],
+        "context_actions"
+    );
     for c in t.slack.rec.all() {
         let len = c.body["markdown_text"].as_str().map(|s| s.chars().count()).unwrap_or(0)
             + c.body["chunks"]

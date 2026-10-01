@@ -5,7 +5,7 @@ Slack bots for your [DocsGPT](https://www.docsgpt.cloud/) agents. One small bina
 - sources and 👍/👎 buttons sit under each answer
 - files you send go to the agent, and files the agent's tools produce come back
 
-Version 2 is a rewrite in Rust on [`docsgpt-rs`](https://github.com/arc53/docsgpt-rs). The Python bot lives on the [`legacy-python`](https://github.com/arc53/slack-bot-docsgpt-extenstion/tree/legacy-python) branch and the `:1` image tag. Existing `.env` files keep working (see [Upgrading from version 1](#upgrading-from-version-1)).
+Version 2 is a rewrite in Rust on [`docsgpt-rs`](https://github.com/arc53/docsgpt-rs). The Python bot lives on the [`legacy-python`](https://github.com/arc53/slack-bot-docsgpt-extenstion/tree/legacy-python) branch. Existing `.env` files keep working (see [Upgrading from version 1](#upgrading-from-version-1)).
 
 ## Features
 
@@ -137,7 +137,7 @@ The bot updates each streaming answer at most every 1.2 s and keeps within these
 
 ## Upgrading from version 1
 
-- **Images and branches:** the `:1` image tag and the `legacy-python` branch keep the Python bot; `:latest` and `:2` are the Rust bot.
+- **Branches and images:** the `legacy-python` branch keeps the Python bot (build it from there; version 1 had no published image). `:latest` and `:2` are the Rust bot.
 - **`.env`:** works as is. `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `API_KEY` and `API_KEY_<NAME>` mean the same.
 - **MongoDB is no longer supported.** Remove `STORAGE_TYPE=mongodb` and the `MONGODB_*` variables, and mount a volume for `/app/data`. Version 1 kept its own copy of each conversation; version 2 lets DocsGPT keep it, so old threads start a fresh conversation.
 - **Recreate the app from the new manifest** (`--print-manifest`), or add the scopes and events it lists to your existing app and reinstall it. Version 2 needs streaming, agent sessions, files and the slash command.

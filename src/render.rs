@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 
 /// `markdown_text` and `markdown` blocks take at most 12,000 characters per call/message.
 pub const MARKDOWN_LIMIT: usize = 11_500;
+/// Text one streamed message may hold in total (Slack answers `msg_too_long`
+/// somewhere above 12k; it doesn't document the exact limit).
+pub const STREAM_MESSAGE_LIMIT: usize = 11_000;
 /// Action id of the 👍/👎 buttons.
 pub const FEEDBACK_ACTION: &str = "docsgpt_feedback";
 

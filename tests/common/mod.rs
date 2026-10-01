@@ -111,11 +111,17 @@ impl MockSlack {
     /// Text of a streamed message: startStream + appendStream chunks + stopStream text.
     pub fn streamed_text(&self) -> String {
         let mut out = String::new();
-        for c in self.rec.all() {
-            if matches!(
-                c.method.as_str(),
-                "chat.startStream" | "chat.appendStream" | "chat.stopStream"
-            ) {
+        let all = self.rec.all();
+        for (i, c) in all.iter().enumerate() {
+            let rejected = all
+                .get(i + 1)
+                .is_some_and(|n| n.method == "rejected" && n.body["method"] == c.method.as_str());
+            if !rejected
+                && matches!(
+                    c.method.as_str(),
+                    "chat.startStream" | "chat.appendStream" | "chat.stopStream"
+                )
+            {
                 if let Some(t) = c.body["markdown_text"].as_str() {
                     out.push_str(t);
                 }
@@ -127,6 +133,21 @@ impl MockSlack {
             }
         }
         out
+    }
+
+    /// Calls Slack answered with `ok: false`, as `method: error`.
+    pub fn rejected(&self) -> Vec<String> {
+        self.rec
+            .calls("rejected")
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}: {}",
+                    c.body["method"].as_str().unwrap_or(""),
+                    c.body["error"].as_str().unwrap_or("")
+                )
+            })
+            .collect()
     }
 
     /// Wait for the Socket Mode client, then push a frame.
@@ -163,19 +184,70 @@ async fn api(State(m): State<Arc<MockSlack>>, Path(method): Path<String>, header
     if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         call.query.insert("authorization".into(), auth.to_string());
     }
+    let new_ts = m.next_ts();
+    if matches!(method.as_str(), "chat.startStream" | "chat.postMessage") {
+        call.query.insert("ts".into(), new_ts.clone());
+    }
     m.rec.record(call);
     let fault = m.faults.lock().unwrap().get_mut(&method).and_then(VecDeque::pop_front);
     match fault {
-        Some(Fault::Error(code)) => return axum::Json(json!({"ok": false, "error": code})).into_response(),
+        Some(Fault::Error(code)) => return reject(&m, &method, &code),
         Some(Fault::RateLimited) => return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "1")]).into_response(),
         None => {}
+    }
+    // Like Slack: a stream started with `chunks` must keep using chunks.
+    if matches!(
+        method.as_str(),
+        "chat.startStream" | "chat.appendStream" | "chat.stopStream"
+    ) && body.get("markdown_text").is_some()
+        && (body.get("chunks").is_some()
+            || m.rec
+                .calls("chat.startStream")
+                .iter()
+                .any(|c| c.body.get("chunks").is_some()))
+    {
+        return reject(&m, &method, "streaming_mode_mismatch");
+    }
+    // Like Slack: a streamed message holds about 12k characters in total.
+    if matches!(method.as_str(), "chat.appendStream" | "chat.stopStream") {
+        let ts = body["ts"].as_str().unwrap_or("").to_string();
+        let start = m
+            .rec
+            .all()
+            .into_iter()
+            .find(|c| c.method == "chat.startStream" && c.query.get("ts") == Some(&ts));
+        let total: usize = m
+            .rec
+            .all()
+            .iter()
+            .filter(|c| {
+                (c.method == "chat.startStream" && c.query.get("ts") == Some(&ts))
+                    || (matches!(c.method.as_str(), "chat.appendStream" | "chat.stopStream")
+                        && c.body["ts"] == ts.as_str())
+            })
+            .flat_map(|c| c.body["chunks"].as_array().cloned().unwrap_or_default())
+            .map(|ch| ch["text"].as_str().map(|t| t.chars().count()).unwrap_or(0))
+            .sum();
+        if start.is_some() && total > 12_000 {
+            return reject(&m, &method, "msg_too_long");
+        }
     }
     let reply = match method.as_str() {
         "auth.test" => {
             json!({"ok": true, "user_id": BOT_USER, "bot_id": "BBOT", "team_id": TEAM, "team": "Test", "user": "docsgpt"})
         }
         "chat.startStream" | "chat.postMessage" => {
-            json!({"ok": true, "channel": body["channel"], "ts": m.next_ts()})
+            json!({"ok": true, "channel": body["channel"], "ts": new_ts})
+        }
+        "files.info" => {
+            let id = body["file"].as_str().unwrap_or("").to_string();
+            match m.files.lock().unwrap().get(&id).cloned() {
+                Some((mime, bytes)) => json!({"ok": true, "file": {
+                    "id": id, "name": format!("{id}.txt"), "mimetype": mime, "size": bytes.len(),
+                    "url_private_download": format!("{}/files/{id}", m.url),
+                }}),
+                None => return reject(&m, &method, "file_not_found"),
+            }
         }
         "files.getUploadURLExternal" => {
             json!({"ok": true, "upload_url": format!("{}/upload/F1", m.url), "file_id": "F1"})
@@ -186,6 +258,13 @@ async fn api(State(m): State<Arc<MockSlack>>, Path(method): Path<String>, header
         _ => json!({"ok": true}),
     };
     axum::Json(reply).into_response()
+}
+
+/// An `ok: false` reply, also logged as a `rejected` call.
+fn reject(m: &MockSlack, method: &str, code: &str) -> Response {
+    m.rec
+        .record(Call::new("rejected", json!({"method": method, "error": code})));
+    axum::Json(json!({"ok": false, "error": code})).into_response()
 }
 
 async fn upload(State(m): State<Arc<MockSlack>>, Path(id): Path<String>, body: Bytes) -> StatusCode {

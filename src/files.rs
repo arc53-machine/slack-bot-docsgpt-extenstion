@@ -50,10 +50,35 @@ fn is_audio(mime: &str, name: &str) -> bool {
 pub async fn prepare(bot: &SlackBot, agent: &AgentConfig, files: &[Value], question_empty: bool) -> Prepared {
     let mut out = Prepared::default();
     let max = (bot.cfg.max_file_mb as usize) * 1024 * 1024;
-    for f in files.iter().take(MAX_FILES) {
+    for stub in files.iter().take(MAX_FILES) {
+        // Events often carry only {id, file_access: "check_file_info"}; fetch the rest.
+        let looked_up;
+        let f = if stub["file_access"].as_str() == Some("check_file_info")
+            || (stub.get("url_private").is_none() && stub.get("url_private_download").is_none())
+        {
+            match bot
+                .api
+                .call_form("files.info", &[("file", stub["id"].as_str().unwrap_or("").to_string())])
+                .await
+            {
+                Ok(v) => {
+                    looked_up = v["file"].clone();
+                    &looked_up
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "files.info failed");
+                    out.problems.push("I couldn't open an attached file.".into());
+                    continue;
+                }
+            }
+        } else {
+            stub
+        };
         let name = safe_filename(f["name"].as_str().or(f["title"].as_str()).unwrap_or("file"), "file");
-        if f["mode"].as_str() == Some("hidden_by_limit") || f["file_access"].as_str() == Some("check_file_info") {
-            out.problems.push(format!("I can't open {name}."));
+        if f["mode"].as_str() == Some("hidden_by_limit") {
+            out.problems.push(format!(
+                "I can't open {name}: it's hidden by the workspace's plan limits."
+            ));
             continue;
         }
         if f["size"].as_u64().is_some_and(|s| s as usize > max) {
