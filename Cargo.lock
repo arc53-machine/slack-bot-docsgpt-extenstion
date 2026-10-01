@@ -433,7 +433,7 @@ dependencies = [
 [[package]]
 name = "docsgpt"
 version = "0.1.0"
-source = "git+https://github.com/arc53-machine/docsgpt-rs?rev=91d7f4d#91d7f4da67965e870b67ecefea986ddbf3dc8b68"
+source = "git+https://github.com/arc53/docsgpt-rs?rev=0e623a5#0e623a53db9e27e63d2ac87571e66f542efd3b5e"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -450,7 +450,7 @@ dependencies = [
 [[package]]
 name = "docsgpt-bot"
 version = "0.1.0"
-source = "git+https://github.com/arc53-machine/docsgpt-rs?rev=91d7f4d#91d7f4da67965e870b67ecefea986ddbf3dc8b68"
+source = "git+https://github.com/arc53/docsgpt-rs?rev=0e623a5#0e623a53db9e27e63d2ac87571e66f542efd3b5e"
 dependencies = [
  "async-trait",
  "docsgpt",
