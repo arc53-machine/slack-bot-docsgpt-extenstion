@@ -1,9 +1,16 @@
-version: '3.8'
-
 services:
   slack-bot:
     image: arc53/slack-bot-docsgpt-extenstion:latest
     container_name: slack-bot-docsgpt-extension
     env_file:
       - .env
+    volumes:
+      - botdata:/app/data
+      # Multi-bot setup: mount a config file and point the bot at it.
+      # - ./docsgpt-slack.toml:/app/docsgpt-slack.toml:ro
+    # ports:
+    #   - "8080:8080"   # HTTP mode (/slack/<bot>/events) and /healthz
     restart: unless-stopped
+
+volumes:
+  botdata:

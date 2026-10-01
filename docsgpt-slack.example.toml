@@ -1,0 +1,56 @@
+# Copy to docsgpt-slack.toml (or point DOCSGPT_SLACK_CONFIG at it).
+# ${VAR} and ${VAR:-default} are read from the environment, so secrets can stay in .env.
+
+api_base = "https://gptcloud.arc53.com"
+
+[storage]
+backend = "sqlite"            # sqlite | memory
+# path = "data/docsgpt-slack.db"
+
+[server]                      # used by bots in HTTP mode
+bind = "0.0.0.0:8080"
+public_url = "https://bots.example.com"   # Slack posts to <public_url>/slack/<bot name>/events
+
+# ---------------------------------------------------------------------------
+[[bots]]
+name = "support"
+bot_token = "${SLACK_SUPPORT_BOT_TOKEN}"
+app_token = "${SLACK_SUPPORT_APP_TOKEN}"   # Socket Mode
+mode = "socket"               # socket | http
+channels = "thread"           # thread: a mention starts a thread the bot follows | mention | off
+streaming = true
+agent_view = true             # agent sessions in DMs; matches agent_view in the manifest
+reactions = true              # 👀 while answering in channels
+files = true
+max_file_mb = 20
+# allowed_channels = ["C0123456"]
+description = "Answers questions about our product."
+command = "/docsgpt"
+# api_base = "https://docs.internal.example.com"   # per-bot DocsGPT
+
+  [[bots.suggested_prompts]]
+  title = "Getting started"
+  message = "How do I get started?"
+
+  [[bots.agents]]
+  name = "support"
+  api_key = "${DOCSGPT_KEY_SUPPORT}"
+  description = "Product and billing questions"
+  default = true
+
+  [[bots.agents]]
+  name = "sales"
+  api_key = "${DOCSGPT_KEY_SALES}"
+  description = "Pricing and plans"
+
+# ---------------------------------------------------------------------------
+[[bots]]
+name = "internal"
+bot_token = "${SLACK_INTERNAL_BOT_TOKEN}"
+signing_secret = "${SLACK_INTERNAL_SIGNING_SECRET}"
+mode = "http"
+channels = "mention"
+
+  [[bots.agents]]
+  name = "docs"
+  api_key = "${DOCSGPT_KEY_DOCS}"
